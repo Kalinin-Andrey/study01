@@ -1,0 +1,390 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"reflect"
+	"runtime"
+	"strconv"
+	"strings"
+)
+
+// код писать тут
+
+// CaseResponse
+type CR map[string]interface{} // todo: перед отправкой закоментировать
+
+type myApiWrapper struct {
+	api     *MyApi
+	IsError bool
+	Error   ApiError
+	result  CR
+}
+
+var apiWrapper = myApiWrapper{
+	IsError: false,
+	result: CR{
+		"error": "",
+	},
+}
+
+func (apiWrapper *myApiWrapper) getFuncName(f http.HandlerFunc) (funcName string) {
+	funcName = runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
+	arr := strings.Split(funcName, `.`)
+	l := len(arr)
+	funcName = arr[l-1]
+	arr = strings.Split(funcName, `-`)
+	funcName = arr[0]
+	return funcName
+}
+
+func (api *MyApi) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	apiWrapper.api = api
+	apiWrapper.IsError = false
+	apiWrapper.result = CR{
+		"error": "",
+	}
+
+	switch r.URL.Path {
+	case "/user/profile":
+		handlerFunc := apiWrapper.Profile
+		//funcName := apiWrapper.getFuncName(handlerFunc)
+		//url := "/user/" + strings.ToLower(funcName) + "/"
+		handlerFunc = apiWrapper.panicMiddleware(handlerFunc)
+		handlerFunc(w, r)
+	case "/user/create":
+		handlerFunc := apiWrapper.Create
+		//funcName := apiWrapper.getFuncName(handlerFunc)
+		//url := "/user/" + strings.ToLower(funcName) + "/"
+
+		//	method check
+		if true {
+			handlerFunc = apiWrapper.checkMethodsMiddleware(handlerFunc, http.MethodPost)
+		}
+		//	access check
+		if true {
+			handlerFunc = apiWrapper.accessMiddleware(handlerFunc)
+		}
+		handlerFunc = apiWrapper.panicMiddleware(handlerFunc)
+		handlerFunc(w, r)
+	default:
+		apiWrapper.NotFound(w, r)
+	}
+
+}
+
+func (apiWrapper *myApiWrapper) NotFound(w http.ResponseWriter, r *http.Request) {
+	apiWrapper.returnResult(w, nil, ApiError{
+		HTTPStatus: http.StatusNotFound,
+		Err:        fmt.Errorf("unknown method"),
+	})
+	return
+}
+
+func (apiWrapper *myApiWrapper) Create(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	params := &CreateParams{} // <--
+	err := apiWrapper.validateAndGetParams(w, r, params)
+	if err != nil {
+		apiWrapper.returnResult(w, nil, ApiError{
+			Err:        err,
+			HTTPStatus: http.StatusBadRequest,
+		})
+		return
+	}
+
+	res, err := apiWrapper.api.Create(ctx, *params) // <--
+
+	apiWrapper.returnResult(w, res, err)
+}
+
+func (apiWrapper *myApiWrapper) Profile(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+	params := &ProfileParams{}
+	err := apiWrapper.validateAndGetParams(w, r, params)
+	if err != nil {
+		apiWrapper.returnResult(w, nil, ApiError{
+			Err:        err,
+			HTTPStatus: http.StatusBadRequest,
+		})
+		return
+	}
+
+	res, err := apiWrapper.api.Profile(ctx, *params)
+
+	apiWrapper.returnResult(w, res, err)
+}
+
+func (apiWrapper *myApiWrapper) returnResult(w http.ResponseWriter, res interface{}, err error) {
+
+	if err != nil {
+		apiWrapper.IsError = true
+		error, ok := err.(ApiError)
+
+		if !ok {
+			apiWrapper.Error = ApiError{
+				Err:        err,
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		} else {
+			apiWrapper.Error = error
+		}
+	}
+
+	if res != nil && !reflect.ValueOf(res).IsNil() {
+		if err != nil {
+			apiWrapper.Error = ApiError{
+				Err:        fmt.Errorf("myApiWrapper.returnResult() error: %v", err.Error()),
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		}
+		apiWrapper.result["response"] = res
+	}
+
+	if apiWrapper.IsError {
+		apiWrapper.result["error"] = apiWrapper.Error.Err.Error()
+		w.WriteHeader(apiWrapper.Error.HTTPStatus)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	response, err := json.Marshal(apiWrapper.result)
+	log.Printf("response: %v", string(response))
+
+	if err != nil {
+		http.Error(w, "myApiWrapper.returnResult() json.Marshal() error: "+err.Error(), http.StatusInternalServerError)
+	}
+	w.Write(response)
+}
+
+func (apiWrapper *myApiWrapper) validateAndGetParams(w http.ResponseWriter, r *http.Request, params interface{}) error {
+	paramsValElem := reflect.ValueOf(params).Elem()
+	posts := make(map[string]interface{}, len(r.Form))
+
+	err := r.ParseForm()
+	if err != nil {
+		log.Fatalf("myApiWrapper.validateAndGetParams() http.Request.ParseForm() error: %v", err.Error())
+		return fmt.Errorf("myApiWrapper.validateAndGetParams() http.Request.ParseForm() error: %v", err.Error())
+	}
+
+	for key, values := range r.Form {
+		posts[key] = values[0]
+	}
+
+	rules := make(map[string]map[string]interface{}, paramsValElem.NumField())
+
+	for i := 0; i < paramsValElem.NumField(); i++ {
+		valueField := paramsValElem.Field(i)
+		typeField := paramsValElem.Type().Field(i)
+		typeOfField := valueField.Type().String()
+		paramName := strings.ToLower(typeField.Name)
+		//log.Println("typeOfField " + paramName + " = " + typeOfField)
+		rules[typeField.Name] = make(map[string]interface{}, 6)
+
+		if ruleStr, ok := typeField.Tag.Lookup("apivalidator"); ok {
+			// filling rules
+			for _, r := range strings.Split(ruleStr, `,`) {
+
+				if r == `required` {
+					rules[typeField.Name][`required`] = true
+				} else {
+					ruleParts := strings.Split(r, `=`)
+
+					switch ruleParts[0] {
+					case `paramname`:
+						rules[typeField.Name][`paramname`] = ruleParts[1]
+						paramName = ruleParts[1]
+					case `min`:
+						rules[typeField.Name][`min`] = ruleParts[1]
+					case `max`:
+						rules[typeField.Name][`max`] = ruleParts[1]
+					case `enum`:
+						rules[typeField.Name][`enum`] = strings.Split(ruleParts[1], `|`)
+					case `default`:
+						rules[typeField.Name][`default`] = ruleParts[1]
+
+					}
+				}
+			}
+
+			if _, ok = posts[paramName]; !ok {
+				if defaultVal, ok := rules[typeField.Name][`default`]; ok {
+					posts[paramName] = defaultVal
+				}
+			}
+
+			if _, ok = posts[paramName]; ok {
+				switch typeOfField {
+				case "int":
+					i, err := strconv.Atoi(posts[paramName].(string))
+					posts[paramName] = i
+					if err != nil {
+						return fmt.Errorf("%v must be int", paramName)
+					}
+				case "uint64":
+					posts[paramName], _ = strconv.ParseInt(posts[paramName].(string), 10, 64)
+				case "string":
+					posts[paramName] = posts[paramName].(string)
+				default:
+					log.Fatalln("apiWrapper.validateAndGetParams() error: conversion type fall")
+				}
+			}
+			// validating by rules
+			for ruleKey, ruleValue := range rules[typeField.Name] {
+
+				switch ruleKey {
+				case `required`:
+					if _, ok = posts[paramName]; !ok {
+						return fmt.Errorf("%v must me not empty", paramName)
+					}
+				case `paramname`:
+				case `min`:
+
+					switch posts[paramName].(type) {
+					case int:
+						ruleValue, _ := strconv.Atoi(ruleValue.(string))
+						if posts[paramName].(int) < ruleValue {
+							return fmt.Errorf("%v must be >= %v", paramName, ruleValue)
+						}
+					case int64:
+						ruleValue, _ := strconv.ParseInt(ruleValue.(string), 10, 64)
+						if posts[paramName].(int64) < ruleValue {
+							return fmt.Errorf("%v must be >= %v", paramName, ruleValue)
+						}
+					case string:
+						ruleValue, _ := strconv.Atoi(ruleValue.(string))
+						if len(posts[paramName].(string)) < ruleValue {
+							return fmt.Errorf("%v len must be >= %v", paramName, ruleValue)
+						}
+					}
+				case `max`:
+
+					switch posts[paramName].(type) {
+					case int:
+						ruleValue, _ := strconv.Atoi(ruleValue.(string))
+						if posts[paramName].(int) > ruleValue {
+							return fmt.Errorf("%v must be <= %v", paramName, ruleValue)
+						}
+					case int64:
+						ruleValue, _ := strconv.ParseInt(ruleValue.(string), 10, 64)
+						if posts[paramName].(int64) > ruleValue {
+							return fmt.Errorf("%v must be <= %v", paramName, ruleValue)
+						}
+					case string:
+						ruleValue, _ := strconv.Atoi(ruleValue.(string))
+						if len(posts[paramName].(string)) > ruleValue {
+							return fmt.Errorf("%v len must be <= %v", paramName, ruleValue)
+						}
+					}
+				case `enum`:
+					data, ok := rules[typeField.Name][`enum`].([]string)
+					if !ok {
+						return fmt.Errorf("myApiWrapper.validateAndGetParams() error: cannot convert %v into []string", rules[typeField.Name][`enum`])
+					}
+					ok = false
+
+					for _, item := range data {
+						if item == posts[paramName] {
+							ok = true
+							break
+						}
+					}
+
+					if !ok {
+						s := rules[typeField.Name][`enum`].([]string)
+						return fmt.Errorf("%v must be one of [%v]", paramName, strings.Join(s, ", "))
+					}
+				case `default`:
+					if _, ok = posts[paramName]; !ok {
+						posts[paramName] = ruleValue
+					}
+				}
+			}
+		}
+		val := reflect.ValueOf(posts[paramName])
+
+		if !valueField.CanSet() {
+			return fmt.Errorf("myApiWrapper.validateAndGetParams() CanSet value: %#v to paramsValElem Field: %#v", posts[paramName], valueField)
+		}
+		valueField.Set(val)
+	}
+
+	log.Printf("Validation: msg is correct\n\n")
+	return nil
+}
+
+func (apiWrapper *myApiWrapper) accessMiddleware(nextFunc http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		if r.Header.Get("X-Auth") != "100500" {
+			apiWrapper.returnResult(w, nil, ApiError{
+				Err:        fmt.Errorf("unauthorized"),
+				HTTPStatus: http.StatusForbidden,
+			})
+			return
+		}
+		login := r.FormValue("login")
+
+		switch login {
+		case "bad_username":
+			{
+				apiWrapper.returnResult(w, nil, ApiError{
+					Err:        fmt.Errorf("bad user"),
+					HTTPStatus: http.StatusInternalServerError,
+				})
+				return
+			}
+		case "not_exist_user":
+			{
+				apiWrapper.returnResult(w, nil, ApiError{
+					Err:        fmt.Errorf("user not exist"),
+					HTTPStatus: http.StatusNotFound,
+				})
+				return
+			}
+		}
+
+		nextFunc(w, r)
+	})
+}
+
+func (apiWrapper *myApiWrapper) checkMethodsMiddleware(nextFunc http.HandlerFunc, method string) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		if r.Method != method {
+			apiWrapper.returnResult(w, nil, ApiError{
+				Err:        fmt.Errorf("bad method"),
+				HTTPStatus: http.StatusNotAcceptable,
+			})
+			return
+		}
+
+		nextFunc(w, r)
+	})
+}
+
+func (apiWrapper *myApiWrapper) logMiddleware(nextFunc http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		nextFunc(w, r)
+	})
+}
+
+func (apiWrapper *myApiWrapper) panicMiddleware(nextFunc http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		nextFunc(w, r)
+
+		defer func() {
+			if err := recover(); err != nil {
+				apiWrapper.returnResult(w, nil, ApiError{
+					Err:        fmt.Errorf("panic: %v", err),
+					HTTPStatus: http.StatusInternalServerError,
+				})
+				return
+			}
+		}()
+	})
+}

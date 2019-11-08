@@ -1,0 +1,7 @@
+# Ignore everything
+/*
+
+# But not these files...
+!.gitignore
+!hw5_codegen
+!hw6_db_explorer
