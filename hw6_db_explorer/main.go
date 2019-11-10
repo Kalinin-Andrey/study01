@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
+	"net/http"
 )
 
 var (
@@ -23,12 +24,12 @@ func main() {
 		panic(err)
 	}
 
-	//handler, err := NewDbExplorer(db)
-	_, err = NewDbExplorer(db)
+	handler, err := NewDbExplorer(db)
+	//_, err = NewDbExplorer(db)
 	if err != nil {
 		panic(err)
 	}
 
 	fmt.Println("starting server at :8082")
-	//http.ListenAndServe(":8082", handler)
+	http.ListenAndServe(":8082", handler)
 }

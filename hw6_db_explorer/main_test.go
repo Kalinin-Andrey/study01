@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"reflect"
 	"testing"
 
@@ -29,7 +30,8 @@ type Case struct {
 }
 
 var (
-	client = &http.Client{Timeout: time.Second}
+	//client = &http.Client{Timeout: time.Second}
+	client = &http.Client{Timeout: time.Hour}
 )
 
 func PrepareTestApis(db *sql.DB) {
@@ -549,6 +551,7 @@ func runCases(t *testing.T, ts *httptest.Server, db *sql.DB, cases []Case) {
 
 		err = json.Unmarshal(body, &result)
 		if err != nil {
+			log.Fatalf("body: %v", string(body))
 			t.Fatalf("[%s] cant unpack json: %v", caseName, err)
 			continue
 		}

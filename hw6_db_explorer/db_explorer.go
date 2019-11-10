@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -41,6 +42,7 @@ type Table struct{
 }
 
 type Field struct {
+	Position	int
 	Name	string
 	Type	string
 	IsNull	bool
@@ -79,7 +81,7 @@ func (t *DbExplorer) init(){
 		table := &Table{}
 		err = rows.Scan(&table.Name)
 		if err != nil {
-			log.Fatalln(err.Error())
+			log.Fatalln("DbExplorer.init() error: " + err.Error())
 		}
 		t.Tables[table.Name] = table
 		t.Tables[table.Name].FieldsNames = make([]string, 0, 10)
@@ -88,35 +90,48 @@ func (t *DbExplorer) init(){
 
 	for _, table := range t.Tables {
 		//rows, err = t.DB.Query("SHOW FULL COLUMNS FROM " + table.Name) // table.Name == "items"
-		rows, err = t.DB.Query("select COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, TABLE_SCHEMA from information_schema.COLUMNS where TABLE_NAME=?;", table.Name)
+		rows, err = t.DB.Query("select ORDINAL_POSITION, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, TABLE_SCHEMA from information_schema.COLUMNS where TABLE_NAME=?;", table.Name)
 		if err != nil {
 			log.Fatalln(err.Error())
 		}
 		prevTableSchema := ""
+		fields := make([]Field, 0, len(t.Tables[table.Name].FieldsNames))
 
 		for rows.Next() {
 			field := &Field{}
 			isNullable := ""
 			columnKey := ""
 			tableSchema := ""
-			err = rows.Scan(&field.Name, &field.Type, &isNullable, &columnKey, &tableSchema)
+			position := ""
+			err = rows.Scan(&position, &field.Name, &field.Type, &isNullable, &columnKey, &tableSchema)
 			if err != nil {
-				log.Fatalln(err.Error())
+				log.Fatalln("DbExplorer.init() error: " + err.Error())
 			}
 			if prevTableSchema != "" && prevTableSchema != tableSchema {
 				continue
 			}
 			prevTableSchema = tableSchema
 
+			field.Position, err = strconv.Atoi(position)
+			if err != nil {
+				log.Fatalln("DbExplorer.init() error: " + err.Error())
+			}
+
 			field.IsNull = (isNullable == "YES")
 
 			if columnKey == "PRI" {
 				table.PK = field.Name
 			}
-			table.FieldsNames = append(table.FieldsNames, field.Name)
 			table.Fields[field.Name] = field
+			fields = append(fields, *field)
 		}
-		//sort.Strings(table.FieldsNames)
+
+		sort.Slice(fields, func(i, j int) bool {
+			return fields[i].Position < fields[j].Position
+		})
+		for _, field := range fields {
+			table.FieldsNames = append(table.FieldsNames, field.Name)
+		}
 		log.Printf("table: %#v\n\n", table)
 	}
 	log.Printf("\n\nt.Tables: %#v\n\n", t.Tables)
@@ -130,6 +145,7 @@ func (t *DbExplorer) GetTables() []string{
 			t.TableNames = append(t.TableNames, tableName)
 		}
 	}
+	sort.Strings(t.TableNames)
 	return t.TableNames
 }
 
@@ -157,42 +173,80 @@ func (t *DbExplorer) GetRecordsets(tableName string, limit int, offset int) (rec
 		// init
 		count := len(t.Tables[table.Name].Fields)
 		rst := make(Recordset, count)
+		columns := make(Recordset, count)
 		valuePtr := make([]interface{}, 0, count)
 
 		for _, fieldName := range t.Tables[table.Name].FieldsNames {
-			rst[fieldName] = new(interface{})
-			valuePtr = append(valuePtr, rst[fieldName])
+			columns[fieldName] = new(interface{})
+			valuePtr = append(valuePtr, columns[fieldName])
 		}
 		// get
 		err = rows.Scan(valuePtr...)
 		if err != nil {
-			log.Fatalln(err.Error())
+			return nil, ApiError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err:        err,
+			}
 		}
 		// convert
-		for _, fieldName := range t.Tables[table.Name].FieldsNames {
-			var v interface{}
-			val := rst[fieldName]
-
-			b, ok := val.([]byte)
+		for i, fieldName := range t.Tables[table.Name].FieldsNames {
+			/*var v interface{}
+			val := rst[fieldName]*/
+			val := valuePtr[i].(*interface{})
+			rst[fieldName] = *val
+			/*b, ok := val.([]byte)
 
 			if (ok) {
 				v = string(b)
 			} else {
 				v = val
 			}
+			if v != nil || !t.Tables[table.Name].Fields[fieldName].IsNull {
 
-			switch t.Tables[table.Name].Fields[fieldName].Type {
-			case "int(11)", "bigint(20)":
-				v, err = strconv.Atoi(v.(string))
-				if err != nil {
-					log.Fatalln(err.Error())
+				switch t.Tables[table.Name].Fields[fieldName].Type {
+				case "int(11)", "bigint(20)":
+
+					switch v.(type) {
+					case uint, uint8:
+						x, _ := v.(uint)
+						v = x
+					case []uint, []uint8:
+						x, _ := v.([]uint)
+						v = x[0]
+					case string:
+						x, _ := v.(string)
+						v, err = strconv.Atoi(x)
+						if err != nil {
+							panic("DbExplorer.GetRecordsets() strconv.Atoi() error: " + err.Error())
+						}
+					}
+
+					if x, ok := v.(uint); ok {
+						v = x
+					} else if x, ok := v.([]uint); ok {
+							v = x[0]
+					} else if x, ok := v.(string); ok{
+						v, err = strconv.Atoi(x)
+						if err != nil {
+							panic("DbExplorer.GetRecordsets() strconv.Atoi() error: " + err.Error())
+						}
+					}
+				default:
+					v = v.(string)
 				}
 			}
-			rst[fieldName] = &v
+			rst[fieldName] = v*/
 		}
 
 		recordsets = append(recordsets, rst)
 	}
+	/*sort.Slice(recordsets, func(i, j int) bool {
+		iValElem := reflect.ValueOf(recordsets[i])
+		jValElem := reflect.ValueOf(recordsets[j])
+		iId := iValElem.FieldByName(t.Tables[table.Name].PK).Int()
+		jId := jValElem.FieldByName(t.Tables[table.Name].PK).Int()
+		return iId < jId
+	})*/
 
 	return recordsets, ApiError{
 		HTTPStatus: http.StatusOK,
@@ -205,7 +259,7 @@ func (t *DbExplorer) GetRecordset(tableName string, id int) (rst Recordset, apiE
 	if !ok {
 		return nil, ApiError{
 			HTTPStatus: http.StatusNotFound,
-			Err: fmt.Errorf("Not found"),
+			Err: fmt.Errorf("record not found"),
 		}
 	}
 
@@ -246,6 +300,10 @@ func (t *DbExplorer) GetRecordset(tableName string, id int) (rst Recordset, apiE
 				v, err = strconv.Atoi(val)
 				if err != nil {
 					log.Fatalln(err.Error())
+					return nil, ApiError{
+						HTTPStatus: http.StatusInternalServerError,
+						Err: err,
+					}
 				}
 			} else if val, ok := v.(int); ok {
 				v = val
@@ -415,6 +473,7 @@ func (t *DbExplorer) HttpHandle(w http.ResponseWriter, r *http.Request) {
 	data, apiError := t.validateAndGetData(r)
 	if apiError.Err != nil {
 		returnResult(w, nil, apiError)
+		return
 	}
 	result := make(R, 1)
 	apiError = ApiError{
@@ -425,26 +484,63 @@ func (t *DbExplorer) HttpHandle(w http.ResponseWriter, r *http.Request) {
 	switch data.methodName{
 	case GetTables:
 		res := t.GetTables()
-		result["response"] = make(map[string][]string, 1)
-		result["response"] = make(map[string][]string, 1)
-		//result["response"]["tables"] = make([]string, 0, len(res))
+		result["response"] = map[string][]string{
+			"tables": res,
+		}
 	case GetRecordsets:
 		res, err := t.GetRecordsets(data.tableName, data.limit, data.offset)
-		returnResult(w, res, err)
+		if err.Err != nil {
+			returnResult(w, nil, err)
+			return
+		}
+		result["response"] = map[string]Recordsets{
+			"records": res,
+		}
 	case GetRecordset:
 		res, err := t.GetRecordset(data.tableName, data.id)
-		returnResult(w, res, err)
+		if err.Err != nil {
+			returnResult(w, nil, err)
+			return
+		}
+		result["response"] = map[string]Recordset{
+			"record": res,
+		}
 	case CreateRecordset:
 		res, err := t.CreateRecordset(data.tableName, data.params)
-		returnResult(w, res, err)
+		if err.Err != nil {
+			returnResult(w, nil, err)
+			return
+		}
+		result["response"] = map[string]int64{
+			"id": res,
+		}
 	case UpdateRecordset:
 		res, err := t.UpdateRecordset(data.tableName, data.id, data.params)
-		returnResult(w, res, err)
+		if err.Err != nil {
+			returnResult(w, nil, err)
+			return
+		}
+		result["response"] = map[string]int64{
+			"updated": res,
+		}
 	case DeleteRecordset:
 		res, err := t.DeleteRecordset(data.tableName, data.id)
-		returnResult(w, res, err)
+		if err.Err != nil {
+			returnResult(w, nil, err)
+			return
+		}
+		result["response"] = map[string]int64{
+			"deleted": res,
+		}
 	}
+
+	if apiError.Err != nil {
+		returnResult(w, nil, apiError)
+		return
+	}
+
 	returnResult(w, result, apiError)
+	return
 }
 
 func (t *DbExplorer) validateAndGetData(r *http.Request) (HandleData, ApiError) {
@@ -478,13 +574,13 @@ func (t *DbExplorer) validateAndSetMethod(r *http.Request, data *HandleData) (Ap
 		}
 	}
 
-	switch count {
-	case 0:
+	switch {
+	case count == 0 || (count == 1 && pathArr[0] == ""):
 		data.methodName = GetTables
-	case 1:
+	case count == 1:
 		data.tableName = pathArr[0]
 		data.methodName = GetRecordsets
-	case 2:
+	case count == 2:
 		data.tableName = pathArr[0]
 		id, err := strconv.Atoi(pathArr[1])
 		if err != nil {
@@ -500,28 +596,36 @@ func (t *DbExplorer) validateAndSetMethod(r *http.Request, data *HandleData) (Ap
 	switch r.Method {
 	case http.MethodGet:
 		if data.methodName == GetRecordsets {
-			limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
-			if err != nil {
-				return ApiError{
-					HTTPStatus: http.StatusBadRequest,
-					Err:        fmt.Errorf("limit mast be integer, err: %v", err.Error()),
+			data.limit = DefaultLimit
+			data.offset = DefaultOffset
+			p := r.URL.Query().Get("limit")
+
+			if p != "" {
+				limit, err := strconv.Atoi(p)
+				if err != nil {
+					return ApiError{
+						HTTPStatus: http.StatusBadRequest,
+						Err:        fmt.Errorf("limit mast be integer, err: %v", err.Error()),
+					}
+				}
+				if limit > 0 {
+					data.limit = limit
 				}
 			}
-			if limit < 1 {
-				limit = DefaultLimit
-			}
-			offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
-			if err != nil {
-				return ApiError{
-					HTTPStatus: http.StatusBadRequest,
-					Err:        fmt.Errorf("offset mast be integer, err: %v", err.Error()),
+			p = r.URL.Query().Get("offset")
+
+			if p != "" {
+				offset, err := strconv.Atoi(p)
+				if err != nil {
+					return ApiError{
+						HTTPStatus: http.StatusBadRequest,
+						Err:        fmt.Errorf("offset mast be integer, err: %v", err.Error()),
+					}
+				}
+				if offset >= 0 {
+					data.offset = offset
 				}
 			}
-			if offset < 1 {
-				offset = DefaultOffset
-			}
-			data.limit = limit
-			data.offset = offset
 		}
 	case http.MethodPut:
 		if data.tableName == "" {
@@ -588,13 +692,35 @@ func (t *DbExplorer) validateAndSetParams(r *http.Request, data *HandleData) (Ap
 
 	if data.methodName == CreateRecordset || data.methodName == UpdateRecordset {
 		bodyBytes, err := ioutil.ReadAll(r.Body)
+		defer r.Body.Close()
 		if err != nil {
 			return ApiError{
 				HTTPStatus: http.StatusBadRequest,
 				Err:        fmt.Errorf(data.methodName + ": table name mast be set"),
 			}
 		}
-		json.Unmarshal(bodyBytes, data.params)
+		var params Recordset
+		json.Unmarshal(bodyBytes, params)
+
+		for k, v := range params {
+			if _, ok := t.Tables[data.tableName].Fields[k]; !ok {
+				continue	// если такого поля нет, то просто игнорим
+			}
+
+			switch t.Tables[data.tableName].Fields[k].Type {
+			case "int(11)", "bigint(20)":
+				v, err = strconv.Atoi(v.(string))
+				if err != nil {
+					log.Fatalln(err.Error())
+					return ApiError{
+						HTTPStatus: http.StatusInternalServerError,
+						Err: err,
+					}
+				}
+			default:
+				v = v.(string)
+			}
+		}
 	}
 
 	return ApiError{
@@ -606,15 +732,31 @@ func (t *DbExplorer) validateAndSetParams(r *http.Request, data *HandleData) (Ap
 func returnResult(w http.ResponseWriter, res interface{}, apiError ApiError) {
 
 	if apiError.Err != nil {
-		w.WriteHeader(apiError.HTTPStatus)
-	} else {
-		w.WriteHeader(http.StatusOK)
+		res = R{
+			"error": apiError.Err.Error(),
+		}
 	}
+
 	response, err := json.Marshal(res)
 	if err != nil {
-		http.Error(w, "returnResult() json.Marshal() error: "+err.Error(), http.StatusInternalServerError)
+		apiError = ApiError{
+			HTTPStatus: http.StatusInternalServerError,
+			Err: fmt.Errorf("returnResult() json.Marshal() cannot marshal a result: %v ; error: %v", res, err.Error()),
+		}
+		res = R{
+			"error": apiError.Err.Error(),
+		}
+		response, _ = json.Marshal(res)
 	}
-	log.Printf("response: %v", string(response))
+
+	if apiError.Err != nil {
+		w.WriteHeader(apiError.HTTPStatus)
+		log.Printf("returnResult() status: %v; ", strconv.Itoa(apiError.HTTPStatus))
+	} else {
+		w.WriteHeader(http.StatusOK)
+		log.Printf("returnResult() status: %v; ", strconv.Itoa(http.StatusOK))
+	}
+	log.Printf("returnResult() response: %v", string(response))
 
 	w.Write(response)
 }
@@ -625,7 +767,7 @@ func NewDbExplorer(db *sql.DB) (http.Handler, error){
 	}
 	dbExplorer.init()
 
-	test(*dbExplorer)
+	//test(*dbExplorer)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", dbExplorer.HttpHandle)
