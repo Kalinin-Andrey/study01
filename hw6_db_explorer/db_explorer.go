@@ -189,53 +189,40 @@ func (t *DbExplorer) GetRecordsets(tableName string, limit int, offset int) (rec
 			}
 		}
 		// convert
+		rst := t.recordsetTypeCasting(table.Name, valuePtr)
+		log.Printf("Table: %v\n", table.Name)
 		for i, fieldName := range t.Tables[table.Name].FieldsNames {
+			log.Printf("field: %v\n", fieldName)
 			/*var v interface{}
 			val := rst[fieldName]*/
 			val := valuePtr[i].(*interface{})
-			rst[fieldName] = *val
-			/*b, ok := val.([]byte)
+			//rst[fieldName] = *val
+			//v := *val
+			var v interface{}
+			var value interface{}
 
-			if (ok) {
-				v = string(b)
-			} else {
-				v = val
+			switch val := (*val).(type) {
+			case []byte:
+				log.Printf("val byte: %#v", val)
+				v = string(val)
+			case nil:
+				log.Printf("val is nil: %#v", val)
+				v = nil
+			default:
+				log.Printf("val case default: %#v", val)
+				panic("Val not a slice byte!")
 			}
+
 			if v != nil || !t.Tables[table.Name].Fields[fieldName].IsNull {
 
 				switch t.Tables[table.Name].Fields[fieldName].Type {
 				case "int(11)", "bigint(20)":
-
-					switch v.(type) {
-					case uint, uint8:
-						x, _ := v.(uint)
-						v = x
-					case []uint, []uint8:
-						x, _ := v.([]uint)
-						v = x[0]
-					case string:
-						x, _ := v.(string)
-						v, err = strconv.Atoi(x)
-						if err != nil {
-							panic("DbExplorer.GetRecordsets() strconv.Atoi() error: " + err.Error())
-						}
-					}
-
-					if x, ok := v.(uint); ok {
-						v = x
-					} else if x, ok := v.([]uint); ok {
-							v = x[0]
-					} else if x, ok := v.(string); ok{
-						v, err = strconv.Atoi(x)
-						if err != nil {
-							panic("DbExplorer.GetRecordsets() strconv.Atoi() error: " + err.Error())
-						}
-					}
+					value, err = strconv.Atoi(v.(string))
 				default:
-					v = v.(string)
+					value = v.(string)
 				}
 			}
-			rst[fieldName] = v*/
+			rst[fieldName] = value
 		}
 
 		recordsets = append(recordsets, rst)
