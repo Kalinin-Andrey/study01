@@ -165,66 +165,33 @@ func (t *DbExplorer) GetRecordsets(tableName string, limit int, offset int) (rec
 	if err != nil {
 		return nil, ApiError{
 			HTTPStatus: http.StatusInternalServerError,
-			Err: fmt.Errorf("Query error"),
+			Err: fmt.Errorf("Query error: %v", err.Error()),
 		}
 	}
 
 	for rows.Next() {
-		// init
-		count := len(t.Tables[table.Name].Fields)
-		rst := make(Recordset, count)
-		columns := make(Recordset, count)
-		valuePtr := make([]interface{}, 0, count)
-
-		for _, fieldName := range t.Tables[table.Name].FieldsNames {
-			columns[fieldName] = new(interface{})
-			valuePtr = append(valuePtr, columns[fieldName])
-		}
+		valuePtr := t.getValuePointerSlice(table.Name)
 		// get
 		err = rows.Scan(valuePtr...)
-		if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ApiError{
+				HTTPStatus: http.StatusNotFound,
+				Err: fmt.Errorf("record not found"),
+			}
+		} else if err != nil {
 			return nil, ApiError{
 				HTTPStatus: http.StatusInternalServerError,
-				Err:        err,
+				Err: err,
 			}
 		}
 		// convert
-		rst := t.recordsetTypeCasting(table.Name, valuePtr)
-		log.Printf("Table: %v\n", table.Name)
-		for i, fieldName := range t.Tables[table.Name].FieldsNames {
-			log.Printf("field: %v\n", fieldName)
-			/*var v interface{}
-			val := rst[fieldName]*/
-			val := valuePtr[i].(*interface{})
-			//rst[fieldName] = *val
-			//v := *val
-			var v interface{}
-			var value interface{}
-
-			switch val := (*val).(type) {
-			case []byte:
-				log.Printf("val byte: %#v", val)
-				v = string(val)
-			case nil:
-				log.Printf("val is nil: %#v", val)
-				v = nil
-			default:
-				log.Printf("val case default: %#v", val)
-				panic("Val not a slice byte!")
+		rst, err := t.recordsetTypeCasting(table.Name, valuePtr)
+		if err != nil {
+			return nil, ApiError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err: err,
 			}
-
-			if v != nil || !t.Tables[table.Name].Fields[fieldName].IsNull {
-
-				switch t.Tables[table.Name].Fields[fieldName].Type {
-				case "int(11)", "bigint(20)":
-					value, err = strconv.Atoi(v.(string))
-				default:
-					value = v.(string)
-				}
-			}
-			rst[fieldName] = value
 		}
-
 		recordsets = append(recordsets, rst)
 	}
 	/*sort.Slice(recordsets, func(i, j int) bool {
@@ -252,59 +219,91 @@ func (t *DbExplorer) GetRecordset(tableName string, id int) (rst Recordset, apiE
 
 	row := t.DB.QueryRow("SELECT * FROM " + table.Name + " WHERE " + t.Tables[tableName].PK + " = ? ", id)
 
-	// init
-	count := len(t.Tables[table.Name].Fields)
-	rst = make(Recordset, count)
-	valuePtr := make([]interface{}, 0, count)
-
-	for _, fieldName := range t.Tables[table.Name].FieldsNames {
-		rst[fieldName] = new(interface{})
-		valuePtr = append(valuePtr, rst[fieldName])
-	}
+	valuePtr := t.getValuePointerSlice(table.Name)
 	// get
 	err := row.Scan(valuePtr...)
-	if err != nil {
-		log.Fatalln(err.Error())
+	if err == sql.ErrNoRows {
+		return nil, ApiError{
+			HTTPStatus: http.StatusNotFound,
+			Err: fmt.Errorf("record not found"),
+		}
+	} else if err != nil {
+		return nil, ApiError{
+			HTTPStatus: http.StatusInternalServerError,
+			Err: err,
+		}
 	}
 	// http.StatusNotFound "record not found"
 	// convert
-	for _, fieldName := range t.Tables[table.Name].FieldsNames {
-		var v interface{}
-		val := rst[fieldName]
-
-		b, ok := val.([]byte)
-
-		if (ok) {
-			v = string(b)
-		} else {
-			v = val
+	rst, err = t.recordsetTypeCasting(table.Name, valuePtr)
+	if err != nil {
+		return nil, ApiError{
+			HTTPStatus: http.StatusInternalServerError,
+			Err: err,
 		}
-
-		switch t.Tables[table.Name].Fields[fieldName].Type {
-		case "int(11)", "bigint(20)":
-
-			if val, ok := v.(string); ok {
-				v, err = strconv.Atoi(val)
-				if err != nil {
-					log.Fatalln(err.Error())
-					return nil, ApiError{
-						HTTPStatus: http.StatusInternalServerError,
-						Err: err,
-					}
-				}
-			} else if val, ok := v.(int); ok {
-				v = val
-			}
-		}
-		rst[fieldName] = v
 	}
-
 
 	return rst, ApiError{
 		HTTPStatus: http.StatusOK,
 		Err: nil,
 	}
+}
 
+func (t *DbExplorer) getValuePointerSlice(tableName string) []interface{} {
+	// init
+	count := len(t.Tables[tableName].Fields)
+	columns := make(Recordset, count)
+	valuePtr := make([]interface{}, 0, count)
+
+	for _, fieldName := range t.Tables[tableName].FieldsNames {
+		columns[fieldName] = new(interface{})
+		valuePtr = append(valuePtr, columns[fieldName])
+	}
+	return valuePtr
+}
+
+func (t *DbExplorer) recordsetTypeCasting(tableName string, valuePtr []interface{}) (Recordset, error) {
+	log.Printf("Table: %v\n", tableName)
+	count := len(t.Tables[tableName].Fields)
+	rst := make(Recordset, count)
+
+	for i, fieldName := range t.Tables[tableName].FieldsNames {
+		log.Printf("field: %v\n", fieldName)
+		val := valuePtr[i].(*interface{})
+		var v interface{}
+		var value interface{}
+
+		switch val := (*val).(type) {
+		case int64:
+			log.Printf("DbExplorer.recordsetTypeCasting() val byte: %#v", val)
+			v = strconv.Itoa(int(val))
+		case []byte:
+			log.Printf("DbExplorer.recordsetTypeCasting() val byte: %#v", val)
+			v = string(val)
+		case nil:
+			log.Printf("DbExplorer.recordsetTypeCasting() val is nil: %#v", val)
+			v = nil
+		default:
+			log.Printf("DbExplorer.recordsetTypeCasting() val case default: %#v", val)
+			return nil, fmt.Errorf("DbExplorer.recordsetTypeCasting() val not a slice byte!\n")
+		}
+
+		if v != nil || !t.Tables[tableName].Fields[fieldName].IsNull {
+
+			switch t.Tables[tableName].Fields[fieldName].Type {
+			case "int(11)", "bigint(20)":
+				var err error
+				value, err = strconv.Atoi(v.(string))
+				if err != nil {
+					return nil, fmt.Errorf("DbExplorer.recordsetTypeCasting() strconv.Atoi(v.(string)) error: %v\n", err.Error())
+				}
+			default:
+				value = v.(string)
+			}
+		}
+		rst[fieldName] = value
+	}
+	return rst, nil
 }
 
 func (t *DbExplorer) FilterPK(tableName string, fieldsNames []string) (newFieldsNames []string, err error) {
@@ -319,6 +318,7 @@ func (t *DbExplorer) FilterPK(tableName string, fieldsNames []string) (newFields
 	}
 	return newFieldsNames, nil
 }
+
 func (t *DbExplorer) CreateRecordset(tableName string, recordset Recordset) (int64, ApiError) {
 	// <-- валидация
 	fieldsNames, err := t.FilterPK(tableName, t.Tables[tableName].FieldsNames)
@@ -499,7 +499,7 @@ func (t *DbExplorer) HttpHandle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result["response"] = map[string]int64{
-			"id": res,
+			t.Tables[data.tableName].PK: res,
 		}
 	case UpdateRecordset:
 		res, err := t.UpdateRecordset(data.tableName, data.id, data.params)
@@ -589,13 +589,7 @@ func (t *DbExplorer) validateAndSetMethod(r *http.Request, data *HandleData) (Ap
 
 			if p != "" {
 				limit, err := strconv.Atoi(p)
-				if err != nil {
-					return ApiError{
-						HTTPStatus: http.StatusBadRequest,
-						Err:        fmt.Errorf("limit mast be integer, err: %v", err.Error()),
-					}
-				}
-				if limit > 0 {
+				if err == nil && limit > 0 {
 					data.limit = limit
 				}
 			}
@@ -603,13 +597,7 @@ func (t *DbExplorer) validateAndSetMethod(r *http.Request, data *HandleData) (Ap
 
 			if p != "" {
 				offset, err := strconv.Atoi(p)
-				if err != nil {
-					return ApiError{
-						HTTPStatus: http.StatusBadRequest,
-						Err:        fmt.Errorf("offset mast be integer, err: %v", err.Error()),
-					}
-				}
-				if offset >= 0 {
+				if err == nil && offset >= 0 {
 					data.offset = offset
 				}
 			}
@@ -678,6 +666,7 @@ func (t *DbExplorer) validateAndSetMethod(r *http.Request, data *HandleData) (Ap
 func (t *DbExplorer) validateAndSetParams(r *http.Request, data *HandleData) (ApiError) {
 
 	if data.methodName == CreateRecordset || data.methodName == UpdateRecordset {
+		count := len(t.Tables[data.tableName].Fields)
 		bodyBytes, err := ioutil.ReadAll(r.Body)
 		defer r.Body.Close()
 		if err != nil {
@@ -686,28 +675,117 @@ func (t *DbExplorer) validateAndSetParams(r *http.Request, data *HandleData) (Ap
 				Err:        fmt.Errorf(data.methodName + ": table name mast be set"),
 			}
 		}
-		var params Recordset
-		json.Unmarshal(bodyBytes, params)
+		var params Recordset = make(Recordset, count)
 
-		for k, v := range params {
-			if _, ok := t.Tables[data.tableName].Fields[k]; !ok {
-				continue	// если такого поля нет, то просто игнорим
-			}
+		if data.methodName == CreateRecordset {
+			// Set default values for params
+			for _, fieldName := range t.Tables[data.tableName].FieldsNames {
 
-			switch t.Tables[data.tableName].Fields[k].Type {
-			case "int(11)", "bigint(20)":
-				v, err = strconv.Atoi(v.(string))
-				if err != nil {
-					log.Fatalln(err.Error())
-					return ApiError{
-						HTTPStatus: http.StatusInternalServerError,
-						Err: err,
-					}
+				if fieldName == t.Tables[data.tableName].PK {
+					continue
 				}
-			default:
-				v = v.(string)
+
+				if t.Tables[data.tableName].Fields[fieldName].IsNull {
+					continue
+					//params[fieldName] = nil
+				}
+
+				switch t.Tables[data.tableName].Fields[fieldName].Type {
+				case "int(11)", "bigint(20)":
+					params[fieldName] = int(0)
+				default:
+					params[fieldName] = ""
+				}
 			}
 		}
+		var e interface{}
+		var jsonMap map[string]interface{}
+		// Get params
+		if err := json.Unmarshal(bodyBytes, &e); err != nil {
+			return ApiError{
+				HTTPStatus: http.StatusInternalServerError,
+				Err:        fmt.Errorf("DbExplorer.validateAndSetParams() json.Unmarshal() error: %v\n", err.Error()),
+			}
+		} else {
+			jsonMap = e.(map[string]interface{})
+		}
+		// Set params
+		for fieldName, value := range jsonMap {
+			// если такого поля нет, то просто игнорим
+			if _, ok := t.Tables[data.tableName].Fields[fieldName]; !ok {
+				continue
+			}
+
+			if fieldName == t.Tables[data.tableName].PK {
+				if data.methodName == UpdateRecordset {
+					return ApiError{
+						HTTPStatus: http.StatusBadRequest,
+						Err:        fmt.Errorf("field %v have invalid type", fieldName),
+					}
+				} else {
+					continue	// PK при создании нужно игнорить
+				}
+			}
+			switch value :=value.(type) {
+			case nil:
+				params[fieldName] = nil
+			case int:
+				params[fieldName] = value
+			case int64:
+				params[fieldName] = int(value)
+			case float64:
+				params[fieldName] = int(value)
+			case string:
+				params[fieldName] = value
+			default:
+				panic("default1!")
+			}
+		}
+		// Проверка типов
+		for fieldName, value := range params {
+
+			switch t.Tables[data.tableName].Fields[fieldName].Type {
+			case "int(11)", "bigint(20)":
+
+				switch value.(type) {
+				case nil:
+					if !t.Tables[data.tableName].Fields[fieldName].IsNull {
+						return ApiError{
+							HTTPStatus: http.StatusBadRequest,
+							Err: fmt.Errorf("field %v have invalid type", fieldName),
+						}
+					}
+				case string:
+					return ApiError{
+						HTTPStatus: http.StatusBadRequest,
+						Err: fmt.Errorf("field %v have invalid type", fieldName),
+					}
+				case int:
+				default:
+					panic("default2!")
+				}
+			default:	//	считаем все остальные строчкой
+
+				switch value.(type) {
+				case nil:
+					if !t.Tables[data.tableName].Fields[fieldName].IsNull {
+						return ApiError{
+							HTTPStatus: http.StatusBadRequest,
+							Err: fmt.Errorf("field %v have invalid type", fieldName),
+						}
+					}
+				case int:
+					return ApiError{
+						HTTPStatus: http.StatusBadRequest,
+						Err: fmt.Errorf("field %v have invalid type", fieldName),
+					}
+				case string:
+				default:
+					panic("default3!")
+				}
+			}
+		}
+		data.params = params
 	}
 
 	return ApiError{
