@@ -2,13 +2,11 @@ package main
 
 import (
 	context "context"
-	"coursera/microservices/grpc_stream/translit"
 	fmt "fmt"
 	proto "github.com/golang/protobuf/proto"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
-	"io"
 	"log"
 	math "math"
 	"net"
@@ -16,6 +14,9 @@ import (
 
 // тут вы пишете код
 // обращаю ваше внимание - в этом задании запрещены глобальные переменные
+
+var LogsMap map[int]chan string = make(map[int]chan string, 2)
+var StatMap map[int]chan string = make(map[int]chan string, 10)
 
 //	implements BizServer interface
 //	тип
