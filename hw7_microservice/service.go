@@ -6,10 +6,12 @@ import (
 	proto "github.com/golang/protobuf/proto"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	status "google.golang.org/grpc/status"
 	"log"
 	math "math"
 	"net"
+	"time"
 )
 
 // тут вы пишете код
@@ -21,12 +23,12 @@ var StatMap map[int]chan string = make(map[int]chan string, 10)
 //	implements BizServer interface
 //	тип
 type BizManager struct {
-
+	eventsChan chan<- Event
 }
 //	возвращающий хелпер
-func NewBizManager() *BizManager {
+func NewBizManager(eventsChan chan<- Event) *BizManager {
 	return &BizManager{
-
+		eventsChan: eventsChan,
 	}
 }
 //	реализация методов
@@ -44,13 +46,36 @@ func (t *BizManager) Test(ctx context.Context, n *Nothing) (*Nothing, error) {
 //	implements AdminServer interface
 //	тип
 type AdminManager struct {
-
+	ctx					context.Context
+	server				grpc.Server
+	eventsChan			<-chan Event
+	logingChansCount	int
+	eventsChans			map[int]*chan<- Event
+	statistic			Statistic
 }
-//	возвращающий хелпер
-func NewAdminManager() *AdminManager {
-	return &AdminManager{
 
+type Statistic map[string]int
+
+//	возвращающий хелпер
+func NewAdminManager(ctx context.Context, server grpc.Server) *AdminManager {
+	m := &AdminManager{
+		ctx: ctx,
+		server: server,
+		eventsChan: make(<-chan Event, 10),
+		statistic: Statistic{
+			"Add": 0,
+			"Check": 0,
+			"Test": 0,
+		},
+		logingChansCount: 0,
 	}
+	go m.eventListener()
+	return m
+}
+func (t *AdminManager) eventListener(){
+// 1. слушаем события из eventsChan
+// и в цикле по logingChansCount пишем в eventsChans
+//	2. слушаем контекст и, при отмене, останавливаем сервер
 }
 //	реализация методов
 func (t *AdminManager) Logging(n *Nothing, srvStream Admin_LoggingServer) error {
@@ -75,6 +100,30 @@ func (t *AdminManager) Statistics(interval *StatInterval, srvStream Admin_Statis
 	return nil
 }
 
+func unaryInterceptor(
+	ctx context.Context,
+	req interface{},
+	info *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (interface{}, error) {
+	start := time.Now()
+
+	md, _ := metadata.FromIncomingContext(ctx)
+
+	reply, err := handler(ctx, req)
+
+	fmt.Printf(`--
+	after incoming call=%v
+	req=%#v
+	reply=%#v
+	time=%v
+	md=%v
+	err=%v
+`, info.FullMethod, req, reply, time.Since(start), md, err)
+	return reply, err
+	// пишем в статистику
+	// шлём событие
+}
 
 
 func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error {
@@ -82,9 +131,14 @@ func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error
 	if err != nil {
 		log.Fatalln("cant listet port", err)
 	}
-	server := grpc.NewServer()
+
+	server := grpc.NewServer(
+		grpc.UnaryInterceptor(unaryInterceptor),
+	)
+
 	RegisterBizServer(server, NewBizManager())
-	RegisterAdminServer(server, NewAdminManager())
+	RegisterAdminServer(server, NewAdminManager(ctx, *server))
+
 	fmt.Println("starting server at :8081")
 	server.Serve(lis)
 
