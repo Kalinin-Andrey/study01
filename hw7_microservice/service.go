@@ -9,7 +9,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/tap"
 	"log"
 	"math"
 	"net"
@@ -92,12 +91,8 @@ func (t *AdminManager) eventListener(){
 			continue
 		//	2. слушаем контекст и, при отмене, останавливаем сервер и выходим
 		case <-t.ctx.Done():
-			//t.server.GracefulStop()
 			t.server.Stop()
 			return
-		//default:
-		//	continue
-
 		}
 	}
 }
@@ -124,22 +119,45 @@ func (t *AdminManager) Statistics(interval *StatInterval, srvStream Admin_Statis
 	return nil
 }
 
-func (t *AdminManager) ACLController(ctx context.Context, info *tap.Info) (context.Context, error) {
-	fmt.Printf("--\ncheck ratelim for %s\n", info.FullMethodName)
-	//	из контекста получаем в методанных consumer
+func (t *AdminManager) ACLController(md metadata.MD, req interface{}, info *grpc.UnaryServerInfo) error {
+	//	получаем из методанных consumer
+	c, ok := md["consumer"]
+	if !ok {
+		return grpc.Errorf(codes.Unauthenticated, "There is not field 'consumer' in metadata.")
+	}
+	consumer := c[0]
 	//	проверяем на соотв запись в t.ACLData
-	return ctx, nil
+	consumerRules, ok := t.ACLData[consumer]
+	if !ok {
+		return grpc.Errorf(codes.Unauthenticated, "There is not such consumer in ACL data.")
+	}
+	found := false
+	for _, consumerRule := range consumerRules {
+		if consumerRule == info.FullMethod {	//	todo: нужно сделать проверку по регулярке
+			found = true
+			break
+		}
+	}
+	if !found {
+		return grpc.Errorf(codes.Unauthenticated, "There is not such method for a consumer %v in ACL data.", consumer)
+	}
+	return nil
 }
 
-func (t *AdminManager) unaryInterceptor(
-	ctx context.Context,
-	req interface{},
-	info *grpc.UnaryServerInfo,
-	handler grpc.UnaryHandler,
-) (interface{}, error) {
+func (t *AdminManager) unaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	start := time.Now()
 
-	md, _ := metadata.FromIncomingContext(ctx)
+	//	из контекста получаем методанные
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("Cannot recive a metadata from context")
+	}
+
+	err := t.ACLController(md, req, info)
+
+	if err != nil {
+		return nil, err
+	}
 
 	reply, err := handler(ctx, req)
 
@@ -184,7 +202,6 @@ func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error
 
 	server := grpc.NewServer(
 		grpc.UnaryInterceptor(adminManager.unaryInterceptor),
-		grpc.InTapHandle(adminManager.ACLController),
 	)
 	adminManager.setServer(server)
 	go adminManager.eventListener()
