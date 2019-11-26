@@ -12,7 +12,7 @@ import (
 	"log"
 	"math"
 	"net"
-	"time"
+	regexp2 "regexp"
 )
 
 // тут вы пишете код
@@ -98,34 +98,30 @@ func (t *AdminManager) eventListener(){
 }
 //	реализация методов
 func (t *AdminManager) Logging(n *Nothing, srvStream Admin_LoggingServer) error {
-	for {
+	log.Print("Logging")
+	/*for {
 		out := &Event{
 			//Word: tr.Translit(inWord.Word),
 		}
 		fmt.Printf("Logging -> %#v", out)
 		srvStream.Send(out)
-	}
+	}*/
 	return nil
 }
 
 func (t *AdminManager) Statistics(interval *StatInterval, srvStream Admin_StatisticsServer) error {
-	for {
+	log.Print("Statistics")
+	/*for {
 		out := &Stat{
 			//Word: tr.Translit(inWord.Word),
 		}
 		fmt.Printf("Logging -> %#v", out)
 		srvStream.Send(out)
-	}
+	}*/
 	return nil
 }
 
-func (t *AdminManager) ACLController(md metadata.MD, req interface{}, info *grpc.UnaryServerInfo) error {
-	//	получаем из методанных consumer
-	c, ok := md["consumer"]
-	if !ok {
-		return grpc.Errorf(codes.Unauthenticated, "There is not field 'consumer' in metadata.")
-	}
-	consumer := c[0]
+func (t *AdminManager) ACLController(consumer string, method string) error {
 	//	проверяем на соотв запись в t.ACLData
 	consumerRules, ok := t.ACLData[consumer]
 	if !ok {
@@ -133,7 +129,13 @@ func (t *AdminManager) ACLController(md metadata.MD, req interface{}, info *grpc
 	}
 	found := false
 	for _, consumerRule := range consumerRules {
-		if consumerRule == info.FullMethod {	//	todo: нужно сделать проверку по регулярке
+		/*regexp, err := syntax.Parse(consumerRule, syntax.Simple)
+		if err != nil {
+			return grpc.Errorf(codes.Unavailable, "ACLData syntax.Parse() error: %v", err.Error())
+		}*/
+		r := regexp2.MustCompile(consumerRule)
+
+		if r.MatchString(method) {
 			found = true
 			break
 		}
@@ -145,15 +147,18 @@ func (t *AdminManager) ACLController(md metadata.MD, req interface{}, info *grpc
 }
 
 func (t *AdminManager) unaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	start := time.Now()
-
+	//start := time.Now()
+	log.Print("unaryInterceptor")
 	//	из контекста получаем методанные
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return nil, fmt.Errorf("Cannot recive a metadata from context")
 	}
-
-	err := t.ACLController(md, req, info)
+	consumer, err := t.getParamFromMetadata(md, "consumer")
+	if err != nil {
+		return nil, grpc.Errorf(codes.Unauthenticated, err.Error())
+	}
+	err = t.ACLController(consumer, info.FullMethod)
 
 	if err != nil {
 		return nil, err
@@ -161,14 +166,14 @@ func (t *AdminManager) unaryInterceptor(ctx context.Context, req interface{}, in
 
 	reply, err := handler(ctx, req)
 
-	fmt.Printf(`--
+	/*fmt.Printf(`--
 	after incoming call=%v
 	req=%#v
 	reply=%#v
 	time=%v
 	md=%v
 	err=%v
-`, info.FullMethod, req, reply, time.Since(start), md, err)
+`, info.FullMethod, req, reply, time.Since(start), md, err)*/
 	// пишем в статистику
 	if _, ok := t.statistic[info.FullMethod]; !ok {
 		t.statistic[info.FullMethod] = 0
@@ -187,21 +192,47 @@ func (t *AdminManager) unaryInterceptor(ctx context.Context, req interface{}, in
 	return reply, err
 }
 
+func (t *AdminManager) getParamFromMetadata(md metadata.MD, param string) (string, error){
+	//	получаем из методанных consumer
+	c, ok := md[param]
+	if !ok {
+		return "", fmt.Errorf("There is not field 'consumer' in metadata.")
+	}
+	return c[0], nil
+}
+func (t *AdminManager) streamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error{
+	log.Print("unaryInterceptor")
+	ctx := ss.Context()
+	//	из контекста получаем методанные
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return fmt.Errorf("Cannot recive a metadata from context")
+	}
+	consumer, err := t.getParamFromMetadata(md, "consumer")
+	if err != nil {
+		return grpc.Errorf(codes.Unauthenticated, err.Error())
+	}
+	err = t.ACLController(consumer, info.FullMethod)
+
+	if err != nil {
+		return err
+	}
+
+	return handler(srv, ss)
+}
+
 
 func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error {
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalln("cant listet port", err)
-	}
 	//ctx, _ = context.WithTimeout(ctx, time.Minute)
 	adminManager := NewAdminManager(ctx)
-	err = json.Unmarshal([]byte(ACLData), &adminManager.ACLData)
+	err := json.Unmarshal([]byte(ACLData), &adminManager.ACLData)
 	if err != nil {
 		return fmt.Errorf("Param ACLData format error: not valid JSON. json.Unmarshal() error: " + err.Error())
 	}
 
 	server := grpc.NewServer(
 		grpc.UnaryInterceptor(adminManager.unaryInterceptor),
+		grpc.StreamInterceptor(adminManager.streamInterceptor),
 	)
 	adminManager.setServer(server)
 	go adminManager.eventListener()
@@ -209,6 +240,10 @@ func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error
 	RegisterBizServer(server, NewBizManager(adminManager.eventsChan))
 	RegisterAdminServer(server, adminManager)
 
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalln("cant listet port", err)
+	}
 	fmt.Println("starting server at :8081")
 	go server.Serve(lis)
 
