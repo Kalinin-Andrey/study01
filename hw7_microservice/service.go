@@ -8,11 +8,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"log"
 	"math"
 	"net"
 	regexp2 "regexp"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // тут вы пишете код
@@ -49,14 +53,15 @@ func (t *BizManager) Test(ctx context.Context, n *Nothing) (*Nothing, error) {
 type AdminManager struct {
 	ctx					context.Context
 	server				*grpc.Server
-	eventsChan			chan Event
-	logsChansCount	int
-	eventsChans			map[int]*chan<- Event
-	statistic			Statistic
 	ACLData				ACL
+	eventsChan			chan Event
+	eventsChans			map[int]chan Event
+	logsChansCount		uint32
+	mu					*sync.Mutex
+	statistic			Stat
 }
 
-type Statistic map[string]int
+//type Statistic map[string]uint64
 
 type ACL map[string][]string
 
@@ -66,12 +71,17 @@ func NewAdminManager(ctx context.Context) *AdminManager {
 		ctx: ctx,
 		server: nil,
 		eventsChan: make(chan Event, 10),
-		statistic: Statistic{
-			"Add": 0,
-			"Check": 0,
-			"Test": 0,
+		eventsChans: make(map[int]chan Event, 10),
+		statistic: Stat{
+			Timestamp:            0,
+			ByMethod:             make(map[string]uint64, 10),
+			ByConsumer:           make(map[string]uint64, 10),
+			//XXX_NoUnkeyedLiteral: interface{},
+			//XXX_unrecognized:     []byte{},
+			//XXX_sizecache:        0,
 		},
 		logsChansCount: 0,
+		mu:	&sync.Mutex{},
 	}
 	go m.eventListener()
 	return m
@@ -85,9 +95,12 @@ func (t *AdminManager) eventListener(){
 		// 1. слушаем события из eventsChan
 		case event := <- t.eventsChan:
 			// и в цикле по logingChansCount пишем в eventsChans
-			for i := 0; i < t.logsChansCount; i++{
-				*t.eventsChans[i] <- event
+			var i uint32
+			//t.mu.Lock()	//	по идее, нужно с этой блокировкой, но с ней он не успевает вычитывать старые события
+			for i = 0; i < t.logsChansCount; i++{
+				t.eventsChans[int(i)] <- event
 			}
+			//t.mu.Unlock()
 			continue
 		//	2. слушаем контекст и, при отмене, останавливаем сервер и выходим
 		case <-t.ctx.Done():
@@ -98,28 +111,49 @@ func (t *AdminManager) eventListener(){
 }
 //	реализация методов
 func (t *AdminManager) Logging(n *Nothing, srvStream Admin_LoggingServer) error {
-	log.Print("Logging")
-	/*for {
-		out := &Event{
-			//Word: tr.Translit(inWord.Word),
+	t.mu.Lock()
+	chanNum := t.logsChansCount
+	//log.Println("Start logging-" + strconv.Itoa(int(chanNum)))
+	atomic.AddUint32(&t.logsChansCount, 1)
+	t.eventsChans[int(chanNum)] = make(chan Event, 10)
+	t.mu.Unlock()
+
+	for {
+		select {
+		case event := <- t.eventsChans[int(chanNum)]:
+			//log.Printf("Logger sender %v send event: %#v\n", chanNum, event)
+			err := srvStream.Send(&event)
+			if err != nil {
+				log.Println("srvStream.Send() error: " + err.Error())
+			}
+		case <-t.ctx.Done():
+			return nil
 		}
-		fmt.Printf("Logging -> %#v", out)
-		srvStream.Send(out)
-	}*/
+	}
 	return nil
 }
 
 func (t *AdminManager) Statistics(interval *StatInterval, srvStream Admin_StatisticsServer) error {
 	log.Print("Statistics")
-	/*for {
-		out := &Stat{
-			//Word: tr.Translit(inWord.Word),
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <- ticker.C:
+			log.Printf("Statistics sender send stat: %#v\n", t.statistic)
+			err := srvStream.Send(&t.statistic)
+			if err != nil {
+				log.Println("srvStream.Send() error: " + err.Error())
+			}
+		case <-t.ctx.Done():
+			return nil
 		}
-		fmt.Printf("Logging -> %#v", out)
-		srvStream.Send(out)
-	}*/
+	}
 	return nil
 }
+
+
 
 func (t *AdminManager) ACLController(consumer string, method string) error {
 	//	проверяем на соотв запись в t.ACLData
@@ -146,9 +180,19 @@ func (t *AdminManager) ACLController(consumer string, method string) error {
 	return nil
 }
 
+func (t *AdminManager) setStatByCustomer(name string){
+	if _, ok := t.statistic.ByConsumer[name]; !ok{
+		t.mu.Lock()
+		t.statistic.ByConsumer[name] = 0
+		t.mu.Unlock()
+	}
+	atomic.AddUint64(&t.statistic.ByConsumer[name], 1)
+}
+func (t *AdminManager) setStatByMethod(name string){}
+
 func (t *AdminManager) unaryInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	//start := time.Now()
-	log.Print("unaryInterceptor")
+	//log.Println("unaryInterceptor")
 	//	из контекста получаем методанные
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -166,25 +210,22 @@ func (t *AdminManager) unaryInterceptor(ctx context.Context, req interface{}, in
 
 	reply, err := handler(ctx, req)
 
-	/*fmt.Printf(`--
-	after incoming call=%v
-	req=%#v
-	reply=%#v
-	time=%v
-	md=%v
-	err=%v
-`, info.FullMethod, req, reply, time.Since(start), md, err)*/
 	// пишем в статистику
 	if _, ok := t.statistic[info.FullMethod]; !ok {
 		t.statistic[info.FullMethod] = 0
 	}
 	t.statistic[info.FullMethod]++
+
+	peer, ok := peer.FromContext(ctx)
+	if !ok {
+		panic("Can't get peer!")
+	}
 	// шлём событие
 	t.eventsChan <- Event{
 		Timestamp:            0,
-		Consumer:             "",
-		Method:               "",
-		Host:                 "",
+		Consumer:             consumer,
+		Method:               info.FullMethod,
+		Host:                 peer.Addr.String(),
 		XXX_NoUnkeyedLiteral: struct{}{},
 		XXX_unrecognized:     nil,
 		XXX_sizecache:        0,
@@ -201,7 +242,7 @@ func (t *AdminManager) getParamFromMetadata(md metadata.MD, param string) (strin
 	return c[0], nil
 }
 func (t *AdminManager) streamInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error{
-	log.Print("unaryInterceptor")
+	//log.Print("streamInterceptor")
 	ctx := ss.Context()
 	//	из контекста получаем методанные
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -216,6 +257,26 @@ func (t *AdminManager) streamInterceptor(srv interface{}, ss grpc.ServerStream, 
 
 	if err != nil {
 		return err
+	}
+	// пишем в статистику
+	if _, ok := t.statistic[info.FullMethod]; !ok {
+		t.statistic[info.FullMethod] = 0
+	}
+	t.statistic[info.FullMethod]++
+
+	peer, ok := peer.FromContext(ctx)
+	if !ok {
+		panic("Can't get peer!")
+	}
+	// шлём событие
+	t.eventsChan <- Event{
+		Timestamp:            0,
+		Consumer:             consumer,
+		Method:               info.FullMethod,
+		Host:                 peer.Addr.String(),
+		XXX_NoUnkeyedLiteral: struct{}{},
+		XXX_unrecognized:     nil,
+		XXX_sizecache:        0,
 	}
 
 	return handler(srv, ss)
