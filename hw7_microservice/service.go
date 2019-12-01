@@ -28,12 +28,13 @@ var StatMap map[int]chan string = make(map[int]chan string, 10)
 //	implements BizServer interface
 //	тип
 type BizManager struct {
-	eventsChan chan<- Event
+	//eventsChan chan<- Event
 }
 //	возвращающий хелпер
-func NewBizManager(eventsChan chan<- Event) *BizManager {
+//func NewBizManager(eventsChan chan<- Event) *BizManager {
+func NewBizManager() *BizManager {
 	return &BizManager{
-		eventsChan: eventsChan,
+		//eventsChan: eventsChan,
 	}
 }
 //	реализация методов
@@ -54,12 +55,13 @@ type AdminManager struct {
 	ctx					context.Context
 	server				*grpc.Server
 	ACLData				ACL
-	eventsChan			chan Event
-	eventsChans			map[uint32]chan Event
-	logsChansCount		uint32
+	//eventsChan			chan Event
+	//eventsChans			map[uint32]chan Event
+	eventsChans			atomic.Value
+	eventsChansCount		uint32
+	statistic			atomic.Value
 	statsChansCount		uint32
 	mu					*sync.Mutex
-	statistic			map[uint32]Stat
 }
 
 //type Statistic map[string]uint64
@@ -71,26 +73,118 @@ func NewAdminManager(ctx context.Context) *AdminManager {
 	m := &AdminManager{
 		ctx: ctx,
 		server: nil,
-		eventsChan: make(chan Event),
-		eventsChans: make(map[uint32]chan Event, 10),
-		statistic: make(map[uint32]Stat, 10),
-		logsChansCount: 0,
+		//eventsChan: make(chan Event),
+		//eventsChans: make(map[uint32]chan Event, 10),
+		//statistic: make(map[uint32]Stat, 10),
+		eventsChansCount: 0,
+		statsChansCount: 0,
 		mu:	&sync.Mutex{},
 	}
+	m.eventsChans.Store(make(map[uint32]chan Event, 10))
+	m.statistic.Store(make(map[uint32]Stat))
 	go m.eventListener()
 	return m
 }
+
+func (t *AdminManager) getEventsChan(key uint32) chan Event {
+	eventsChans := t.eventsChans.Load().(map[uint32]chan Event)
+	return eventsChans[key]
+}
+
+func (t *AdminManager) addNewEventsChan() (chan Event, uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	chanNum := atomic.LoadUint32(&t.eventsChansCount)
+	//log.Println("Start logging-" + strconv.Itoa(int(chanNum)))
+	atomic.AddUint32(&t.eventsChansCount, 1)
+	eventsChans := t.eventsChans.Load().(map[uint32]chan Event)
+
+	/*newEventsChans := make(map[uint32]chan Event, len(eventsChans) + 1)
+	for k, v := range eventsChans {
+		newEventsChans[k] = v
+	}*/
+	eventsChans[chanNum] = make(chan Event, 10)
+	t.eventsChans.Store(eventsChans)
+
+	return eventsChans[chanNum], chanNum
+}
+
+func (t *AdminManager) getStatistic(key uint32) Stat {
+	statistic := t.statistic.Load().(map[uint32]Stat)
+	return statistic[key]
+}
+
+func (t *AdminManager) setStatistic(key uint32, val Stat) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	statistic := t.statistic.Load().(map[uint32]Stat)
+
+	newStatistic := make(map[uint32]Stat, len(statistic) + 1)
+	for k, v := range statistic {
+		newStatistic[k] = v
+	}
+	newStatistic[key] = val
+	t.statistic.Store(newStatistic)
+}
+
+func (t *AdminManager) resetStatistic(key uint32) {
+	statistic := t.statistic.Load().(map[uint32]Stat)
+
+	newStatistic := make(map[uint32]Stat, len(statistic) + 1)
+	for k, v := range statistic {
+		newStatistic[k] = v
+	}
+	newStatistic[key] = Stat{
+		Timestamp:            0,
+		ByMethod:             make(map[string]uint64, 10),
+		ByConsumer:           make(map[string]uint64, 10),
+		//XXX_NoUnkeyedLiteral: interface{},
+		//XXX_unrecognized:     []byte{},
+		//XXX_sizecache:        0,
+	}
+	t.statistic.Store(newStatistic)
+}
+
+func (t *AdminManager) addNewStatistic() (Stat, uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	chanNum := atomic.LoadUint32(&t.statsChansCount)
+	//log.Println("Start logging-" + strconv.Itoa(int(chanNum)))
+	atomic.AddUint32(&t.statsChansCount, 1)
+	statistic := t.statistic.Load().(map[uint32]Stat)
+
+	newStatistic := make(map[uint32]Stat, len(statistic) + 1)
+	for k, v := range statistic {
+		newStatistic[k] = v
+	}
+
+	newStatistic[chanNum] = Stat{
+		Timestamp:            0,
+		ByMethod:             make(map[string]uint64, 10),
+		ByConsumer:           make(map[string]uint64, 10),
+		//XXX_NoUnkeyedLiteral: interface{},
+		//XXX_unrecognized:     []byte{},
+		//XXX_sizecache:        0,
+	}
+	t.statistic.Store(newStatistic)
+
+	return newStatistic[chanNum], chanNum
+}
+
 func (t *AdminManager) setServer(server *grpc.Server){
 	t.server = server
 }
+
 func (t *AdminManager) setEvent(event Event){
 	// и в цикле по logingChansCount пишем в eventsChans
 	var i uint32
-	for i = 0; i < t.logsChansCount; i++{
-		t.eventsChans[i] <- event
+	eventsChansCount := atomic.LoadUint32(&t.eventsChansCount)
+	for i = 0; i < eventsChansCount; i++{
+		t.getEventsChan(i) <- event
 	}
 	return
 }
+
 func (t *AdminManager) eventListener(){
 	for {
 		select {
@@ -98,7 +192,7 @@ func (t *AdminManager) eventListener(){
 		/*case event := <- t.eventsChan:
 			// и в цикле по logingChansCount пишем в eventsChans
 			var i uint32
-			for i = 0; i < t.logsChansCount; i++{
+			for i = 0; i < t.eventsChansCount; i++{
 				t.eventsChans[i] <- event
 			}
 			continue*/
@@ -111,16 +205,11 @@ func (t *AdminManager) eventListener(){
 }
 //	реализация методов
 func (t *AdminManager) Logging(n *Nothing, srvStream Admin_LoggingServer) error {
-	t.mu.Lock()
-	chanNum := t.logsChansCount
-	//log.Println("Start logging-" + strconv.Itoa(int(chanNum)))
-	atomic.AddUint32(&t.logsChansCount, 1)
-	t.eventsChans[chanNum] = make(chan Event, 10)
-	t.mu.Unlock()
+	eventsChan, _ := t.addNewEventsChan()
 
 	for {
 		select {
-		case event := <- t.eventsChans[chanNum]:
+		case event := <- eventsChan:
 			//log.Printf("Logger sender %v send event: %#v\n", chanNum, event)
 			err := srvStream.Send(&event)
 			if err != nil {
@@ -134,19 +223,7 @@ func (t *AdminManager) Logging(n *Nothing, srvStream Admin_LoggingServer) error 
 }
 
 func (t *AdminManager) Statistics(interval *StatInterval, srvStream Admin_StatisticsServer) error {
-	t.mu.Lock()
-	chanNum := t.statsChansCount
-	//log.Println("Start logging-" + strconv.Itoa(int(chanNum)))
-	atomic.AddUint32(&t.statsChansCount, 1)
-	t.statistic[chanNum] = Stat{
-		Timestamp:            0,
-		ByMethod:             make(map[string]uint64, 10),
-		ByConsumer:           make(map[string]uint64, 10),
-		//XXX_NoUnkeyedLiteral: interface{},
-		//XXX_unrecognized:     []byte{},
-		//XXX_sizecache:        0,
-	}
-	t.mu.Unlock()
+	stat, num := t.addNewStatistic()
 	log.Print("Statistics")
 	d := time.Duration(interval.IntervalSeconds) * time.Second
 	ticker := time.NewTicker(d)
@@ -155,19 +232,12 @@ func (t *AdminManager) Statistics(interval *StatInterval, srvStream Admin_Statis
 	for {
 		select {
 		case <- ticker.C:
+			//log.Printf("Statistics sender send stat: %#v\n", t.statistic)
 			t.mu.Lock()
-			stat := t.statistic[chanNum]
-			t.statistic[chanNum] = Stat{
-				Timestamp:            0,
-				ByMethod:             make(map[string]uint64, 10),
-				ByConsumer:           make(map[string]uint64, 10),
-				//XXX_NoUnkeyedLiteral: interface{},
-				//XXX_unrecognized:     []byte{},
-				//XXX_sizecache:        0,
-			}
-			t.mu.Unlock()
-			log.Printf("Statistics sender send stat: %#v\n", t.statistic)
+			stat = t.getStatistic(num)
 			err := srvStream.Send(&stat)
+			t.resetStatistic(num)
+			t.mu.Unlock()
 			if err != nil {
 				log.Println("srvStream.Send() error: " + err.Error())
 			}
@@ -208,15 +278,13 @@ func (t *AdminManager) setStatByConsumer(name string){
 	var i uint32
 
 	for i = 0; i < count; i++{
-		if _, ok := t.statistic[i].ByConsumer[name]; !ok{
-			t.mu.Lock()
-			t.statistic[i].ByConsumer[name] = 1
-			t.mu.Unlock()
+		statistic := t.getStatistic(i)
+		if _, ok := statistic.ByConsumer[name]; !ok{
+			statistic.ByConsumer[name] = 1
 		} else {
-			t.mu.Lock()
-			t.statistic[i].ByConsumer[name]++
-			t.mu.Unlock()
+			statistic.ByConsumer[name]++
 		}
+		t.setStatistic(i, statistic)
 	}
 }
 func (t *AdminManager) setStatByMethod(name string){
@@ -224,15 +292,13 @@ func (t *AdminManager) setStatByMethod(name string){
 	var i uint32
 
 	for i = 0; i < count; i++{
-		if _, ok := t.statistic[i].ByMethod[name]; !ok{
-			t.mu.Lock()
-			t.statistic[i].ByMethod[name] = 1
-			t.mu.Unlock()
+		statistic := t.getStatistic(i)
+		if _, ok := statistic.ByMethod[name]; !ok{
+			statistic.ByMethod[name] = 1
 		} else {
-			t.mu.Lock()
-			t.statistic[i].ByMethod[name]++
-			t.mu.Unlock()
+			statistic.ByMethod[name]++
 		}
+		t.setStatistic(i, statistic)
 	}
 }
 
@@ -348,7 +414,8 @@ func StartMyMicroservice(ctx context.Context, addr string, ACLData string) error
 	adminManager.setServer(server)
 	go adminManager.eventListener()
 
-	RegisterBizServer(server, NewBizManager(adminManager.eventsChan))
+	//RegisterBizServer(server, NewBizManager(adminManager.eventsChan))
+	RegisterBizServer(server, NewBizManager())
 	RegisterAdminServer(server, adminManager)
 
 	lis, err := net.Listen("tcp", addr)
