@@ -8,92 +8,102 @@ import (
 func i2s(data interface{}, out interface{}) error {
 	dataVal := reflect.ValueOf(data)
 	//dataValElem := reflect.ValueOf(data).Elem()
-	outVal := reflect.ValueOf(out).Elem()
+	outVal := reflect.ValueOf(out)
+	outValElem := outVal.Elem()
+	outType := reflect.TypeOf(out)
 	//outValElem := reflect.ValueOf(out).Elem()
 
-	if outVal.Kind() != reflect.Ptr {
+	//if outType.Kind() != reflect.Ptr && outType.Kind() != reflect.Uintptr {
+	if outType.Kind() != reflect.Ptr {
 		return fmt.Errorf("Parameter out must be a Ptr")
 	}
-	outPtr := outVal.Addr().Interface().(*interface{})
 
+	if !outValElem.CanSet() {
+		return fmt.Errorf("!outValElem.CanSet()")
+	}
+	outPtrType := reflect.Indirect(outVal).Kind()
 
-	switch dataVal.Kind() {
+	switch outPtrType {
+	//switch dataVal.Kind() {
 	case reflect.Bool:
-		res := dataVal.Bool()
-		//outVal.SetBool(res)
-		*outPtr = res
+		res, ok := data.(bool)
+		if !ok {
+			return fmt.Errorf("Wrong type of data")
+		}
+		outValElem.SetBool(res)
 	case reflect.Int:
-		res := int64(dataVal.Int())
-		outVal.SetInt(res)
+		fl, ok := data.(float64)
+		if !ok {
+			return fmt.Errorf("Wrong type of data")
+		}
+		res := int64(fl)
+		outValElem.SetInt(res)
 	case reflect.Float32, reflect.Float64:
-		res := int64(dataVal.Float())
-		//if outVal.CanSet() {
-		//	outVal.SetInt(res)
-		//}
-		*outPtr = res
+		res, ok := data.(float64)
+		if !ok {
+			return fmt.Errorf("Wrong type of data")
+		}
+		outValElem.SetFloat(res)
 	case reflect.String:
-		res := dataVal.String()
-		//if outVal.CanSet() {
-		//	outVal.SetString(res)
-		//}
-		*outPtr = res
+		res, ok := data.(string)
+		if !ok {
+			return fmt.Errorf("Wrong type of data")
+		}
+		outValElem.SetString(res)
 	case reflect.Slice:
 		len := dataVal.Len()
-		res := make([]interface{}, len, len)
+		elemType := outType.Elem().Elem()
+		slice := reflect.MakeSlice(outValElem.Type(), 0, len)
 
 		for i := 0; i < len; i++ {
-			var val interface{}
-			v := dataVal.Index(i)
-			err := i2s(v.Interface(), &val)
+			dataElem := dataVal.Index(i)
+			elem := reflect.New(elemType)
+
+			err := i2s(dataElem.Interface(), elem.Interface())
 			if err != nil {
 				return err
 			}
-			res = append(res, val)
+			//elemVal := reflect.ValueOf(elem)
+			//elemValElem := elemVal.Elem()
+			e := reflect.Indirect(elem)
+			slice = reflect.Append(slice, e)
+			//outValElem = reflect.Append(outValElem, e)
 		}
-		//resVal := reflect.ValueOf(res)
-		//if outVal.CanSet() {
-		//	outVal.Set(resVal)
-		//}
-		*outPtr = res
+		outValElem.Set(slice)
+
 		//slice := valueReflectOut.Elem().FieldByName(key.String())
 		//for i := 0; i < valueSlice.Len(); i++ {
 		//	slice = reflect.Append(slice, outSlice.Index(i))
 		//}
 		//valueReflectOut.Elem().FieldByName(key.String()).Set(slice)
 	case reflect.Map:
-		res := make(map[string]interface{}, dataVal.Len())
+		return fmt.Errorf("Kind Map\n")
+	case reflect.Struct:
 		iter := dataVal.MapRange()
 
 		for iter.Next() {
 			k := iter.Key()
 			v := iter.Value()
-			var val interface{}
-			err := i2s(v.Interface(), &val)
+
+			field := outValElem.FieldByName(k.String())
+
+			if !field.CanAddr() {
+				panic("Cannot get address!")
+			}
+			err := i2s(v.Interface(), field.Addr().Interface())
 			if err != nil {
 				return err
 			}
-			res[k.String()] = val
+			//res[k.String()] = val
 		}
-		//resVal := reflect.ValueOf(res)
-		//if outVal.CanSet() {
-		//	outVal.Set(resVal)
-		//}
-		*outPtr = res
-	case reflect.Struct:
-		return fmt.Errorf("Kind is Struct! Kind() = %v ; data = %#v\n", dataVal.Kind(), data)
+		//outValElem.Set(reflect.ValueOf(&res))
 	default:
 		return fmt.Errorf("Kind unknown! Kind() = %v ; data = %#v\n", dataVal.Kind(), data)
 	}
 
 
-	//for i := 0; i < numOfFields ; i++ {
-	//
-	//}
-
-	fmt.Println(dataVal.Kind())
-	fmt.Println(outVal.Kind())
-	//fmt.Println(dataValElem.Kind())
-	//fmt.Println(outValElem.Kind())
+	//fmt.Println(dataVal)
+	//fmt.Println(outVal)
 
 
 	return nil
