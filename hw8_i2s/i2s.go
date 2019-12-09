@@ -6,25 +6,22 @@ import (
 )
 
 func i2s(data interface{}, out interface{}) error {
-	dataVal := reflect.ValueOf(data)
-	//dataValElem := reflect.ValueOf(data).Elem()
-	outVal := reflect.ValueOf(out)
-	outValElem := outVal.Elem()
 	outType := reflect.TypeOf(out)
-	//outValElem := reflect.ValueOf(out).Elem()
 
-	//if outType.Kind() != reflect.Ptr && outType.Kind() != reflect.Uintptr {
 	if outType.Kind() != reflect.Ptr {
 		return fmt.Errorf("Parameter out must be a Ptr")
 	}
+
+	outVal := reflect.ValueOf(out)
+	outValElem := outVal.Elem()
 
 	if !outValElem.CanSet() {
 		return fmt.Errorf("!outValElem.CanSet()")
 	}
 	outPtrType := reflect.Indirect(outVal).Kind()
+	dataVal := reflect.ValueOf(data)
 
 	switch outPtrType {
-	//switch dataVal.Kind() {
 	case reflect.Bool:
 		res, ok := data.(bool)
 		if !ok {
@@ -51,6 +48,10 @@ func i2s(data interface{}, out interface{}) error {
 		}
 		outValElem.SetString(res)
 	case reflect.Slice:
+		dataKind := dataVal.Kind()
+		if dataKind != reflect.Slice {
+			return fmt.Errorf("Wrong type of data: %v", dataKind)
+		}
 		len := dataVal.Len()
 		elemType := outType.Elem().Elem()
 		slice := reflect.MakeSlice(outValElem.Type(), 0, len)
@@ -70,15 +71,13 @@ func i2s(data interface{}, out interface{}) error {
 			//outValElem = reflect.Append(outValElem, e)
 		}
 		outValElem.Set(slice)
-
-		//slice := valueReflectOut.Elem().FieldByName(key.String())
-		//for i := 0; i < valueSlice.Len(); i++ {
-		//	slice = reflect.Append(slice, outSlice.Index(i))
-		//}
-		//valueReflectOut.Elem().FieldByName(key.String()).Set(slice)
 	case reflect.Map:
 		return fmt.Errorf("Kind Map\n")
 	case reflect.Struct:
+		dataKind := dataVal.Kind()
+		if dataKind != reflect.Map {	//	структура после анмаршалинга распознаётся как мапа
+			return fmt.Errorf("Wrong type of data: %v", dataKind)
+		}
 		iter := dataVal.MapRange()
 
 		for iter.Next() {
