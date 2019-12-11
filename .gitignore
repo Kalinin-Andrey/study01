@@ -3,6 +3,10 @@
 
 # But not these files...
 !.gitignore
+!hw1_tree
+!hw2_signer
+!hw3_bench
+!hw4_test_coverage
 !hw5_codegen
 !hw6_db_explorer
 !hw7_microservice
